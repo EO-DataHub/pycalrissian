@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Dict, List
 
 import yaml
-from kubernetes import client
+from kubernetes import client, config
 from kubernetes.client.models.v1_container import V1Container
 from kubernetes.client.models.v1_exec_action import V1ExecAction
 from kubernetes.client.models.v1_lifecycle import V1Lifecycle
@@ -16,7 +16,6 @@ from loguru import logger
 
 from pycalrissian.context import CalrissianContext
 
-
 class ContainerNames(Enum):
     CALRISSIAN = "calrissian"
 
@@ -25,13 +24,15 @@ class ContainerNames(Enum):
 # SIDECAR_OUTPUT = "sidecar-container-output"
 # SIDECAR_COPY = "sidecar-container-copy"
 
-
 class CalrissianJob:
     def __init__(
         self,
         cwl: Dict,
         params: Dict,
         runtime_context: CalrissianContext,
+        calling_workspace: str,
+        executing_workspace: str,
+        job_id: str,
         cwl_entry_point: str = None,
         pod_env_vars: Dict = None,
         pod_node_selector: Dict = None,
@@ -56,7 +57,7 @@ class CalrissianJob:
         self.max_ram = max_ram
         self.max_cores = max_cores
         self.security_context = security_context
-        self.service_account = service_account
+        self.service_account = runtime_context.service_account
         self.storage_class = storage_class  # check this, is it needed?
         self.debug = debug
         self.no_read_only = no_read_only
@@ -64,6 +65,9 @@ class CalrissianJob:
         self.backoff_limit = backoff_limit
         self.volume_calrissian_wdir = "volume-calrissian-wdir"
         self.tool_logs = tool_logs
+        self.calling_workspace = calling_workspace
+        self.executing_workspace = executing_workspace
+        self.job_id = job_id
 
         if self.security_context is None:
             logger.info(
@@ -83,6 +87,10 @@ class CalrissianJob:
         logger.info("create processing parameters config map")
         self._create_params_cm()
 
+        # Add env var for aws creds location
+        if not self.pod_env_vars:
+            self.pod_env_vars = {}
+
         if self.pod_env_vars:
             logger.info("create pod environment variables config map")
             self._create_pod_env_vars_cm()
@@ -96,19 +104,19 @@ class CalrissianJob:
     def _create_cwl_cm(self):
         """Create configMap with CWL"""
         self.runtime_context.create_configmap(
-            name="cwl-workflow", key="cwl-workflow", content=yaml.dump(self.cwl)
+            name=f"cwl-workflow-{self.job_id}", key="cwl-workflow", content=yaml.dump(self.cwl)
         )
 
     def _create_params_cm(self):
         """Create configMap with params"""
         self.runtime_context.create_configmap(
-            name="params", key="params", content=yaml.dump(self.params)
+            name=f"params-{self.job_id}", key="params", content=yaml.dump(self.params)
         )
 
     def _create_pod_env_vars_cm(self):
         """Create configMap with pod environment variables"""
         self.runtime_context.create_configmap(
-            name="pod-env-vars",
+            name=f"pod-env-vars-{self.job_id}",
             key="pod-env-vars",
             content=json.dumps(self.pod_env_vars),
         )
@@ -116,7 +124,7 @@ class CalrissianJob:
     def _create_pod_node_selector_cm(self):
         """Create configMap with pod node selector"""
         self.runtime_context.create_configmap(
-            name="pod-node-selector",
+            name=f"pod-node-selector-{self.job_id}",
             key="pod-node-selector",
             content=json.dumps(self.pod_node_selector),
         )
@@ -150,7 +158,7 @@ class CalrissianJob:
         workflow_volume = client.V1Volume(
             name="volume-cwl-workflow",
             config_map=client.V1ConfigMapVolumeSource(
-                name="cwl-workflow",
+                name=f"cwl-workflow-{self.job_id}",
                 optional=False,
                 items=[
                     client.V1KeyToPath(
@@ -169,7 +177,7 @@ class CalrissianJob:
         params_volume = client.V1Volume(
             name="volume-params",
             config_map=client.V1ConfigMapVolumeSource(
-                name="params",
+                name=f"params-{self.job_id}",
                 optional=False,
                 items=[client.V1KeyToPath(key="params", path="params.yml", mode=0o644)],
                 default_mode=0o644,
@@ -205,7 +213,7 @@ class CalrissianJob:
             pod_env_vars_volume = client.V1Volume(
                 name="volume-pod-env-vars",
                 config_map=client.V1ConfigMapVolumeSource(
-                    name="pod-env-vars",
+                    name=f"pod-env-vars-{self.job_id}",
                     optional=False,
                     items=[
                         client.V1KeyToPath(
@@ -228,7 +236,7 @@ class CalrissianJob:
             pod_node_selector_volume = client.V1Volume(
                 name="volume-pod-node-selector",
                 config_map=client.V1ConfigMapVolumeSource(
-                    name="pod-node-selector",
+                    name=f"pod-node-selector-{self.job_id}",
                     optional=False,
                     items=[
                         client.V1KeyToPath(
@@ -249,6 +257,98 @@ class CalrissianJob:
 
             volume_mounts.append(pod_node_selector_volume_mount)
 
+        try:
+            workspace_config = self.runtime_context.core_v1_api.read_namespaced_config_map(name="workspace-config", namespace=self.runtime_context.namespace)
+        except Exception as e:
+            logger.error(f"Failed to read 'workspace-config' ConfigMap: {e}")
+            workspace_config = None
+        pvcs_json = workspace_config.data.get("pvcs", "[]")
+        try:
+            pvcs_list = json.loads(pvcs_json)
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing PVCs JSON: {e}")
+            pvcs_list = []
+
+        for pvc_map in pvcs_list:
+            pvc_name = pvc_map.get("pvcName")
+            pv_name = pvc_map.get("pvName")
+            if pvc_name and self.runtime_context.is_pvc_created(name=pvc_name):
+                volume_name = f"workspace-efs-{pvc_name}"
+                efs_pvc_volume = client.V1Volume(
+                    name=volume_name,
+                    persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
+                        claim_name=pvc_name
+                    ),
+                )
+
+                efs_volume_mount = client.V1VolumeMount(
+                    mount_path=f"/workspace/{pv_name}",
+                    name=volume_name,
+                )
+                logger.info(f"Mounting workspace EFS volume at {efs_volume_mount.mount_path}.")
+
+                volumes.append(efs_pvc_volume)
+
+                volume_mounts.append(efs_volume_mount)
+
+        # Mount calling workspace PVC
+        if self.calling_workspace != self.executing_workspace:
+            # Load kubeconfig
+            config.load_incluster_config()
+
+            # Create a CustomObjectsApi client instance
+            custom_api = client.CustomObjectsApi()
+
+            # Get calling workspace CRD
+            try:
+                calling_workspace = custom_api.get_namespaced_custom_object(
+                    group="core.telespazio-uk.io",
+                    version="v1alpha1",
+                    namespace="workspaces",
+                    plural="workspaces",
+                    name=self.calling_workspace,
+                )
+            except Exception as e:
+                logger.error(f"Error in getting workspace CRD: {e}")
+                raise e
+            
+            # Get efs access-point details
+            efs_access_points = calling_workspace["status"]["aws"]["efs"]["accessPoints"]
+
+            # Get persistent volumes from the calling workspace
+            persistent_volumes = calling_workspace["spec"]["storage"]["persistentVolumes"]
+
+            pv_name_map = {}
+            # Construct pv and access point map
+            for pv in persistent_volumes:
+                pv_name_map.update({pv["volumeSource"]["accessPointName"]: pv["name"]})
+
+            for access_point in efs_access_points:
+                pvc_mount_path = pv_name_map[access_point["name"]]
+                basic_pv_name = pvc_mount_path.replace("pv-", "", 1)
+                pv_name = f"temp-pv-{basic_pv_name}"
+                pvc_name = f"temp-pvc-workspace-{basic_pv_name}"
+                logger.info(
+                    f"Mount persistent volume {pv_name}"
+                )
+                efs_pvc_volume = client.V1Volume(
+                    name=pv_name,
+                    persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
+                        claim_name=pvc_name
+                    ),
+                )
+
+                efs_volume_mount = client.V1VolumeMount(
+                    mount_path=f"/workspace/{pvc_mount_path}",
+                    name=pv_name
+                )
+
+                logger.info(f"Mounting calling workspace EFS volume {pv_name} with claim {pvc_name} at {efs_volume_mount.mount_path}.")
+
+                volumes.append(efs_pvc_volume)
+
+                volume_mounts.append(efs_volume_mount)        
+
         pod_spec = self.create_pod_template(
             name="calrissian_pod",
             containers=[
@@ -256,7 +356,10 @@ class CalrissianJob:
             ],
             volumes=volumes,
             security_context=self.security_context,
+            service_account=self.service_account,
+            node_selector=self.pod_node_selector,
         )
+        logger.info(f"Created pod template with service account {self.service_account}")
 
         return self.create_job(
             name=self.job_name,
@@ -293,7 +396,7 @@ class CalrissianJob:
 
     @staticmethod
     def create_pod_template(
-        name, containers, volumes, security_context, node_selector=None
+        name, containers, volumes, security_context, service_account, node_selector=None
     ):
         """Creates the pod template with the three containers"""
 
@@ -309,6 +412,10 @@ class CalrissianJob:
                     fs_group=security_context["fsGroup"],
                 ),
                 termination_grace_period_seconds=120,
+                service_account_name=service_account,
+                tolerations=[
+                    {"key": "ades.zoo.org/dedicated", "operator": "Equal", "value": "job", "effect": "NoSchedule"}
+                ],
             ),
             metadata=client.V1ObjectMeta(name=name, labels={"pod_name": name}),
         )
@@ -350,6 +457,8 @@ class CalrissianJob:
         args.extend(
             ["--max-ram", f"{self.max_ram}", "--max-cores", f"{self.max_cores}"]
         )
+
+        args.extend(["--pod-serviceaccount", self.service_account])
 
         args.extend(["--tmp-outdir-prefix", f"{self.calrissian_base_path}/"])
 
