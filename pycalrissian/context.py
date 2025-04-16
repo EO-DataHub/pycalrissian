@@ -59,7 +59,9 @@ class CalrissianContext:
 
         self.image_pull_secrets = image_pull_secrets
         self.secret_name = "container-rg"
-        self.calrissian_wdir = "calrissian-wdir"
+
+        # set wdir to be job specific to avoid conflicts
+        self.calrissian_wdir = f"calrissian-wdir-{job_id}"
 
         self.labels = labels
         self.annotations = annotations
