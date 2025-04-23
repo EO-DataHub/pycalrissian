@@ -498,6 +498,10 @@ class CalrissianJob:
         else:
             args.extend(["/workflow-input/workflow.cwl", "/workflow-params/params.yml"])
 
+        is_user_service = self.executing_workspace != self.calling_workspace
+        if is_user_service:
+            args.extend(["--user-service"])
+
         return args
 
     def _get_calrissian_container(self, volume_mounts: List) -> V1Container:
