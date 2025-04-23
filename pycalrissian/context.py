@@ -29,6 +29,7 @@ class CalrissianContext:
         kubeconfig_file: TextIO = None,
         labels: Dict = None,
         annotations: Dict = None,
+        calling_service_account: str = None,
     ):
         """Creates a CalrissianContext object
 
@@ -54,6 +55,7 @@ class CalrissianContext:
         self.storage_class = storage_class
         self.volume_size = volume_size
         self.service_account = service_account
+        self.calling_service_account = calling_service_account
 
         self.resource_quota = resource_quota
 
