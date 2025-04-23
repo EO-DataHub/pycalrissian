@@ -487,6 +487,11 @@ class CalrissianJob:
         if self.tool_logs:
             args.extend(["--tool-logs-basepath", self.calrissian_base_path])
 
+        args.extend(["--executing-workspace", self.executing_workspace])
+        args.extend(["--calling-workspace", self.calling_workspace])
+
+        args.extend(["--calling-service-account", self.calling_service_account])
+
         args.extend(["--enable-ext"])
 
         if self.cwl_entry_point is not None:
@@ -499,10 +504,7 @@ class CalrissianJob:
         else:
             args.extend(["/workflow-input/workflow.cwl", "/workflow-params/params.yml"])
 
-        args.extend(["--executing-workspace", self.executing_workspace])
-        args.extend(["--calling-workspace", self.calling_workspace])
-
-        args.extend(["--calling-service-account", self.calling_service_account])
+        
 
         return args
 
