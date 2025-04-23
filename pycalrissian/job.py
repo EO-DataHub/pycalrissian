@@ -58,6 +58,7 @@ class CalrissianJob:
         self.max_cores = max_cores
         self.security_context = security_context
         self.service_account = runtime_context.service_account
+        self.calling_service_account = runtime_context.calling_service_account
         self.storage_class = storage_class  # check this, is it needed?
         self.debug = debug
         self.no_read_only = no_read_only
@@ -498,9 +499,10 @@ class CalrissianJob:
         else:
             args.extend(["/workflow-input/workflow.cwl", "/workflow-params/params.yml"])
 
-        is_user_service = self.executing_workspace != self.calling_workspace
-        if is_user_service:
-            args.extend(["--user-service"])
+        args.extend(["--executing-workspace", self.executing_workspace])
+        args.extend(["--calling-workspace", self.calling_workspace])
+
+        args.extend(["--calling-service-account", self.calling_service_account])
 
         return args
 
