@@ -504,8 +504,6 @@ class CalrissianJob:
         else:
             args.extend(["/workflow-input/workflow.cwl", "/workflow-params/params.yml"])
 
-        
-
         return args
 
     def _get_calrissian_container(self, volume_mounts: List) -> V1Container:
