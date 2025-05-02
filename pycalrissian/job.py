@@ -105,13 +105,13 @@ class CalrissianJob:
     def _create_cwl_cm(self):
         """Create configMap with CWL"""
         self.runtime_context.create_configmap(
-            name=f"cwl-workflow-{self.job_id}", key="cwl-workflow", content=yaml.dump(self.cwl)
+            name=f"{self.job_id}-cwl-workflow", key="cwl-workflow", content=yaml.dump(self.cwl)
         )
 
     def _create_params_cm(self):
         """Create configMap with params"""
         self.runtime_context.create_configmap(
-            name=f"params-{self.job_id}", key="params", content=yaml.dump(self.params)
+            name=f"{self.job_id}-params", key="params", content=yaml.dump(self.params)
         )
 
     def _create_pod_env_vars_cm(self):
@@ -125,7 +125,7 @@ class CalrissianJob:
     def _create_pod_node_selector_cm(self):
         """Create configMap with pod node selector"""
         self.runtime_context.create_configmap(
-            name=f"pod-node-selector-{self.job_id}",
+            name=f"{self.job_id}-pod-node-selector",
             key="pod-node-selector",
             content=json.dumps(self.pod_node_selector),
         )
@@ -159,7 +159,7 @@ class CalrissianJob:
         workflow_volume = client.V1Volume(
             name="volume-cwl-workflow",
             config_map=client.V1ConfigMapVolumeSource(
-                name=f"cwl-workflow-{self.job_id}",
+                name=f"{self.job_id}-cwl-workflow",
                 optional=False,
                 items=[
                     client.V1KeyToPath(
@@ -178,7 +178,7 @@ class CalrissianJob:
         params_volume = client.V1Volume(
             name="volume-params",
             config_map=client.V1ConfigMapVolumeSource(
-                name=f"params-{self.job_id}",
+                name=f"{self.job_id}-params",
                 optional=False,
                 items=[client.V1KeyToPath(key="params", path="params.yml", mode=0o644)],
                 default_mode=0o644,
@@ -214,7 +214,7 @@ class CalrissianJob:
             pod_env_vars_volume = client.V1Volume(
                 name="volume-pod-env-vars",
                 config_map=client.V1ConfigMapVolumeSource(
-                    name=f"pod-env-vars-{self.job_id}",
+                    name=f"{self.job_id}-pod-env-vars",
                     optional=False,
                     items=[
                         client.V1KeyToPath(
@@ -237,7 +237,7 @@ class CalrissianJob:
             pod_node_selector_volume = client.V1Volume(
                 name="volume-pod-node-selector",
                 config_map=client.V1ConfigMapVolumeSource(
-                    name=f"pod-node-selector-{self.job_id}",
+                    name=f"{self.job_id}-pod-node-selector",
                     optional=False,
                     items=[
                         client.V1KeyToPath(

@@ -63,7 +63,7 @@ class CalrissianContext:
         self.secret_name = "container-rg"
 
         # set wdir to be job specific to avoid conflicts
-        self.calrissian_wdir = f"calrissian-wdir-{job_id}"
+        self.calrissian_wdir = f"{job_id}-calrissian-wdir"
 
         self.labels = labels
         self.annotations = annotations
