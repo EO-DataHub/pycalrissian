@@ -285,6 +285,7 @@ class CalrissianJob:
                 efs_volume_mount = client.V1VolumeMount(
                     mount_path=f"/workspace/{pv_name}",
                     name=volume_name,
+                    read_only=False,
                 )
                 logger.info(f"Mounting workspace EFS volume at {efs_volume_mount.mount_path}.")
 
@@ -341,7 +342,8 @@ class CalrissianJob:
 
                 efs_volume_mount = client.V1VolumeMount(
                     mount_path=f"/workspace/{pvc_mount_path}",
-                    name=pv_name
+                    name=pv_name,
+                    read_only=False,
                 )
 
                 logger.info(f"Mounting calling workspace EFS volume {pv_name} with claim {pvc_name} at {efs_volume_mount.mount_path}.")
