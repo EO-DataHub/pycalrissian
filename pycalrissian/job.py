@@ -295,11 +295,9 @@ class CalrissianJob:
 
         # Mount calling workspace PVC
         if self.calling_workspace != self.executing_workspace:
-            # Load kubeconfig
-            config.load_incluster_config()
-
-            # Create a CustomObjectsApi client instance
-            custom_api = client.CustomObjectsApi()
+            # Create a CustomObjectsApi client instance using proxy-aware client
+            custom_api_client = self.runtime_context._get_api_client_for_custom_objects()
+            custom_api = client.CustomObjectsApi(api_client=custom_api_client)
 
             # Get calling workspace CRD
             try:

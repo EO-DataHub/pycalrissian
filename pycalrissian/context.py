@@ -129,11 +129,9 @@ class CalrissianContext:
 
         # create additional calling workspace PVC only when calling_workspace is provided
         if self.calling_workspace != self.executing_workspace:
-            # Load kubeconfig
-            config.load_incluster_config()
-
-            # Create a CustomObjectsApi client instance
-            custom_api = client.CustomObjectsApi()
+            # Create a CustomObjectsApi client instance using proxy-aware client
+            custom_api_client = self._get_api_client_for_custom_objects()
+            custom_api = client.CustomObjectsApi(api_client=custom_api_client)
 
             # extract calling workspace details
             try:
@@ -240,8 +238,43 @@ class CalrissianContext:
         kubeconfig = os.getenv("KUBECONFIG", None)
 
         if proxy_url:
-            api_config = Configuration(host=proxy_url)
+            # When HTTP_PROXY is set (e.g., kubectl-proxy), use HTTP instead of HTTPS
+            # kubectl-proxy doesn't support CONNECT tunneling required for HTTPS
+            api_config = Configuration()
+            # Use HTTP protocol for Kubernetes API endpoint
+            api_config.host = "http://kubernetes.default.svc"
             api_config.proxy = proxy_url
+            # Disable SSL verification for HTTP connections
+            api_config.verify_ssl = False
+            
+            # Load authentication from in-cluster config or kubeconfig
+            try:
+                # Try in-cluster config first (for pods running in Kubernetes)
+                config.load_incluster_config()
+                # Get the default configuration that was just loaded
+                default_config = Configuration.get_default_copy()
+                # Copy authentication settings
+                if hasattr(default_config, 'api_key') and default_config.api_key:
+                    api_config.api_key = default_config.api_key.copy()
+                if hasattr(default_config, 'api_key_prefix') and default_config.api_key_prefix:
+                    api_config.api_key_prefix = default_config.api_key_prefix.copy()
+            except config.ConfigException:
+                # If not in-cluster, load from kubeconfig
+                if kubeconfig:
+                    config.load_kube_config(config_file=kubeconfig)
+                elif kubeconfig_file:
+                    config.load_kube_config(config_file=kubeconfig_file)
+                else:
+                    config.load_kube_config()
+                
+                # Get the default configuration that was just loaded
+                default_config = Configuration.get_default_copy()
+                # Copy authentication settings
+                if hasattr(default_config, 'api_key') and default_config.api_key:
+                    api_config.api_key = default_config.api_key.copy()
+                if hasattr(default_config, 'api_key_prefix') and default_config.api_key_prefix:
+                    api_config.api_key_prefix = default_config.api_key_prefix.copy()
+            
             api_client = client.ApiClient(api_config)
 
         elif kubeconfig:
@@ -250,7 +283,7 @@ class CalrissianContext:
             config.load_kube_config(config_file=kubeconfig)
             api_client = client.ApiClient()
         elif kubeconfig_file:
-            config.load_kube_config(config_file=kubeconfig)
+            config.load_kube_config(config_file=kubeconfig_file)
             api_client = client.ApiClient()
         else:
             # if nothing is specified, kubernetes-python will use the file
@@ -271,6 +304,18 @@ class CalrissianContext:
     def _get_rbac_authorization_v1_api(self) -> client.RbacAuthorizationApi:
 
         return client.RbacAuthorizationV1Api(self.api_client)
+
+    def _get_api_client_for_custom_objects(self):
+        """Get a proxy-aware API client for CustomObjectsApi.
+        
+        This method returns the existing API client which is already
+        configured to handle HTTP_PROXY for kubectl-proxy.
+        
+        Returns:
+            ApiClient: Configured API client for CustomObjectsApi
+        """
+        # Reuse the existing api_client which is already proxy-aware
+        return self.api_client
 
     def is_object_created(self, read_method, **kwargs):
 
