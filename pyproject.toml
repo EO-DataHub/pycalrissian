@@ -29,8 +29,8 @@ dependencies = [
     "loguru",
     "typing-extensions==4.8.0",
     "kubernetes>=33.1.0",
-    "cwltool>=3.1.20260108082145",
-    "setuptools==78.1.1"
+    "cwltool>=3.1.20241007082533",
+    "setuptools>=75.3.3"
 ]
 
 [project.urls]
@@ -73,8 +73,8 @@ dependencies = [
     "loguru",
     "typing-extensions==4.8.0",
     "kubernetes>=33.1.0",
-    "cwltool>=3.1.20260108082145",
-    "setuptools==78.1.1"
+    "cwltool>=3.1.20241007082533",
+    "setuptools>=75.3.3"
 ]
 
 ## [project.scripts]

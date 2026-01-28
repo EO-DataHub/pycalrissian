@@ -240,24 +240,11 @@ class CalrissianContext:
         if proxy_url:
             # When HTTP_PROXY is set (e.g., kubectl-proxy), use HTTP instead of HTTPS
             # kubectl-proxy doesn't support CONNECT tunneling required for HTTPS
-            api_config = Configuration()
-            # Use HTTP protocol for Kubernetes API endpoint
-            api_config.host = "http://kubernetes.default.svc"
-            api_config.proxy = proxy_url
-            # Disable SSL verification for HTTP connections
-            api_config.verify_ssl = False
             
-            # Load authentication from in-cluster config or kubeconfig
+            # Load authentication from in-cluster config or kubeconfig first
             try:
                 # Try in-cluster config first (for pods running in Kubernetes)
                 config.load_incluster_config()
-                # Get the default configuration that was just loaded
-                default_config = Configuration.get_default_copy()
-                # Copy authentication settings
-                if hasattr(default_config, 'api_key') and default_config.api_key:
-                    api_config.api_key = default_config.api_key.copy()
-                if hasattr(default_config, 'api_key_prefix') and default_config.api_key_prefix:
-                    api_config.api_key_prefix = default_config.api_key_prefix.copy()
             except config.ConfigException:
                 # If not in-cluster, load from kubeconfig
                 if kubeconfig:
@@ -266,16 +253,29 @@ class CalrissianContext:
                     config.load_kube_config(config_file=kubeconfig_file)
                 else:
                     config.load_kube_config()
-                
-                # Get the default configuration that was just loaded
-                default_config = Configuration.get_default_copy()
-                # Copy authentication settings
-                if hasattr(default_config, 'api_key') and default_config.api_key:
-                    api_config.api_key = default_config.api_key.copy()
-                if hasattr(default_config, 'api_key_prefix') and default_config.api_key_prefix:
-                    api_config.api_key_prefix = default_config.api_key_prefix.copy()
             
-            api_client = client.ApiClient(api_config)
+            # Get the default configuration that was just loaded
+            default_config = Configuration.get_default_copy()
+            
+            # Modify default_config to use HTTP instead of HTTPS
+            # This ensures that any code creating Kubernetes clients (including generated service.py)
+            # will use HTTP through the proxy
+            if default_config.host and default_config.host.startswith('https://'):
+                # Replace HTTPS with HTTP
+                default_config.host = default_config.host.replace('https://', 'http://', 1)
+            elif not default_config.host or 'kubernetes' not in default_config.host:
+                # If host is not set or doesn't contain kubernetes, set it to HTTP endpoint
+                default_config.host = "http://kubernetes.default.svc"
+            
+            # Set proxy and disable SSL verification
+            default_config.proxy = proxy_url
+            default_config.verify_ssl = False
+            
+            # Set this as the new default so all clients use it
+            Configuration.set_default(default_config)
+            
+            # Create API client using the modified default configuration
+            api_client = client.ApiClient()
 
         elif kubeconfig:
             # this is needed because kubernetes-python does not consider
