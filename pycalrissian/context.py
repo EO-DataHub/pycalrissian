@@ -229,6 +229,8 @@ class CalrissianContext:
         are shared across every job run in this namespace, not job
         specific) intact.
         """
+        self._delete_pods_using_pvc(self.calrissian_wdir)
+
         logger.info(f"delete persistent volume claim {self.calrissian_wdir}")
         self._delete_resource(
             self.core_v1_api.delete_namespaced_persistent_volume_claim,
@@ -236,6 +238,59 @@ class CalrissianContext:
             name=self.calrissian_wdir,
             namespace=self.namespace,
         )
+
+    def _delete_pods_using_pvc(self, pvc_name):
+        """Delete the pod(s) that mounted this job's PVC.
+
+        A completed pod still counts as "in use" for the
+        kubernetes.io/pvc-protection finalizer, so the PVC delete below
+        would otherwise hang in Terminating forever. Scoped to pods that
+        actually mount this PVC so a sibling job's pod in the same
+        namespace is never touched.
+        """
+        pods = self.core_v1_api.list_namespaced_pod(self.namespace)
+        for pod in pods.items:
+            volumes = pod.spec.volumes or []
+            uses_pvc = any(
+                volume.persistent_volume_claim
+                and volume.persistent_volume_claim.claim_name == pvc_name
+                for volume in volumes
+            )
+            if not uses_pvc:
+                continue
+
+            if pod.status.phase not in ("Succeeded", "Failed"):
+                logger.warning(
+                    f"pod {pod.metadata.name} using pvc {pvc_name} is still "
+                    f"{pod.status.phase}, not deleting it"
+                )
+                continue
+
+            job_owner = next(
+                (
+                    owner
+                    for owner in (pod.metadata.owner_references or [])
+                    if owner.kind == "Job"
+                ),
+                None,
+            )
+            if job_owner:
+                logger.info(f"delete job {job_owner.name}")
+                self._delete_resource(
+                    self.batch_v1_api.delete_namespaced_job,
+                    f"job {job_owner.name}",
+                    name=job_owner.name,
+                    namespace=self.namespace,
+                    propagation_policy="Background",
+                )
+            else:
+                logger.info(f"delete pod {pod.metadata.name}")
+                self._delete_resource(
+                    self.core_v1_api.delete_namespaced_pod,
+                    f"pod {pod.metadata.name}",
+                    name=pod.metadata.name,
+                    namespace=self.namespace,
+                )
 
     def _delete_resource(self, delete_fn, description, **kwargs):
         try:
