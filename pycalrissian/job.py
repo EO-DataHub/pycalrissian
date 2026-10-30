@@ -46,6 +46,7 @@ class CalrissianJob:
         keep_pods: bool = False,
         backoff_limit: int = 2,
         tool_logs: bool = False,
+        retry_on_disruption: bool = False,
     ):
 
         self.cwl = cwl
@@ -64,6 +65,7 @@ class CalrissianJob:
         self.no_read_only = no_read_only
         self.keep_pods = keep_pods
         self.backoff_limit = backoff_limit
+        self.retry_on_disruption = retry_on_disruption
         self.volume_calrissian_wdir = "volume-calrissian-wdir"
         self.tool_logs = tool_logs
         self.calling_workspace = calling_workspace
@@ -365,6 +367,7 @@ class CalrissianJob:
             pod_template=pod_spec,
             namespace=self.runtime_context.namespace,
             backoff_limit=self.backoff_limit,
+            retry_on_disruption=self.retry_on_disruption,
         )
 
     @staticmethod
@@ -422,7 +425,9 @@ class CalrissianJob:
         return pod_template
 
     @staticmethod
-    def create_job(name, pod_template, namespace, backoff_limit=4):
+    def create_job(
+        name, pod_template, namespace, backoff_limit=4, retry_on_disruption=False
+    ):
         metadata = client.V1ObjectMeta(
             name=name, labels={"job_name": name}, namespace=namespace
         )
@@ -436,6 +441,21 @@ class CalrissianJob:
                 template=pod_template,
             ),
         )
+
+        if retry_on_disruption:
+            # pods evicted by node disruption are replaced without counting as a retry
+            job.spec.pod_failure_policy = client.V1PodFailurePolicy(
+                rules=[
+                    client.V1PodFailurePolicyRule(
+                        action="Ignore",
+                        on_pod_conditions=[
+                            client.V1PodFailurePolicyOnPodConditionsPattern(
+                                type="DisruptionTarget", status="True"
+                            )
+                        ],
+                    )
+                ]
+            )
 
         return job
 
@@ -527,7 +547,7 @@ class CalrissianJob:
             logger.info("pods created by calrissian will not be deleted")
 
         calrissian_image = os.getenv(
-            "CALRISSIAN_IMAGE", default="public.ecr.aws/eodh/eodhp-calrissian:0.1.9"
+            "CALRISSIAN_IMAGE", default="public.ecr.aws/eodh/eodhp-calrissian:0.1.10"
         )
 
         logger.info(f"using Calrissian image: {calrissian_image}")
