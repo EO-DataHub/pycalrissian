@@ -17,6 +17,12 @@ from kubernetes.client.rest import ApiException
 from kubernetes.stream import stream
 from pycalrissian.context import CalrissianContext
 
+HELPER_POD_TIMEOUT = int(os.environ.get("HELPER_POD_TIMEOUT_SECONDS", "300"))
+
+
+class HelperPodError(Exception):
+    """Raised when the helper pod cannot be used to reach the volume."""
+
 
 class HelperPod:
     def __init__(
@@ -24,10 +30,12 @@ class HelperPod:
         context: CalrissianContext,
         volume: Dict,
         volume_mount: Dict,
+        timeout: int = HELPER_POD_TIMEOUT,
     ):
         self.context = context
         self.volume = volume
         self.volume_mount = volume_mount
+        self.timeout = timeout
         self.container_name = "container-kube-cp"
         self.pod_name = f"kube-cp-{self._get_uid()}"
 
@@ -37,7 +45,24 @@ class HelperPod:
     def _get_uid():
         return str(uuid.uuid4())[-6:]
 
+    def _check_volume(self):
+        claim_name = (self.volume.get("persistentVolumeClaim") or {}).get("claimName")
+        if not claim_name:
+            return
+        try:
+            pvc = self.context.core_v1_api.read_namespaced_persistent_volume_claim(
+                name=claim_name,
+                namespace=self.context.namespace,
+            )
+        except ApiException as e:
+            if e.status == 404:
+                raise HelperPodError(f"pvc {claim_name} not found") from e
+            raise
+        if pvc.metadata.deletion_timestamp is not None:
+            raise HelperPodError(f"pvc {claim_name} is being deleted")
+
     def _create_pod(self):
+        self._check_volume()
         pod_manifest = {
             "apiVersion": "v1",
             "kind": "Pod",
@@ -68,13 +93,29 @@ class HelperPod:
             body=pod_manifest,
             namespace=self.context.namespace,
         )
+        # delete the pod when it never becomes usable
+        try:
+            self._wait_for_pod()
+        except Exception:
+            self.dismiss()
+            raise
+
+    def _wait_for_pod(self):
+        deadline = time.monotonic() + self.timeout
         while True:
             resp = self.context.core_v1_api.read_namespaced_pod(
                 name=self.pod_name,
                 namespace=self.context.namespace,
             )
-            if resp.status.phase != "Pending":
-                break
+            phase = resp.status.phase
+            if phase == "Running":
+                return
+            if phase not in (None, "Pending"):
+                raise HelperPodError(f"helper pod {self.pod_name} is {phase}")
+            if time.monotonic() >= deadline:
+                raise HelperPodError(
+                    f"helper pod {self.pod_name} still Pending after {self.timeout}s"
+                )
             time.sleep(1)
 
     def dismiss(self):
