@@ -1,6 +1,6 @@
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from kubernetes import client
 from kubernetes.client.rest import ApiException
@@ -69,7 +69,9 @@ class TestHelperPod(unittest.TestCase):
         pod_name = self.core.create_namespaced_pod.call_args.kwargs["body"]["metadata"][
             "name"
         ]
-        self.core.delete_namespaced_pod.assert_called_once_with(pod_name, "ns")
+        self.core.delete_namespaced_pod.assert_called_once_with(
+            pod_name, "ns", _request_timeout=ANY
+        )
 
     def test_running(self, _sleep):
         self.core.read_namespaced_pod.side_effect = [pod("Pending"), pod("Running")]
@@ -86,6 +88,68 @@ class TestHelperPod(unittest.TestCase):
         self.core.read_namespaced_pod.return_value = pod("Running")
         self.helper_pod(volume={"name": "wdir", "emptyDir": {}})
         self.core.read_namespaced_persistent_volume_claim.assert_not_called()
+
+    def test_create_error_still_deletes_pod(self, _sleep):
+        error = ConnectionError("response lost")
+        self.core.create_namespaced_pod.side_effect = error
+        with self.assertRaises(ConnectionError) as raised:
+            self.helper_pod()
+        self.assertIs(raised.exception, error)
+        self.core.delete_namespaced_pod.assert_called_once()
+
+    def test_failed_cleanup_keeps_original_error(self, _sleep):
+        self.core.create_namespaced_pod.side_effect = ConnectionError("create")
+        self.core.delete_namespaced_pod.side_effect = ConnectionError("delete")
+        with self.assertRaisesRegex(ConnectionError, "create"):
+            self.helper_pod()
+
+    def test_dismiss_ignores_missing_pod(self, _sleep):
+        self.core.read_namespaced_pod.return_value = pod("Running")
+        helper = self.helper_pod()
+        self.core.delete_namespaced_pod.side_effect = ApiException(status=404)
+        helper.dismiss()
+
+    def test_api_calls_have_request_timeout(self, _sleep):
+        self.core.read_namespaced_pod.return_value = pod("Failed")
+        with self.assertRaises(HelperPodError):
+            self.helper_pod()
+        for call in (
+            self.core.read_namespaced_persistent_volume_claim,
+            self.core.create_namespaced_pod,
+            self.core.read_namespaced_pod,
+            self.core.delete_namespaced_pod,
+        ):
+            timeout = call.call_args.kwargs["_request_timeout"]
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, 30)
+
+    def test_delete_timeout_after_deadline(self, _sleep):
+        self.core.read_namespaced_pod.return_value = pod("Pending")
+        with self.assertRaises(HelperPodError):
+            self.helper_pod(timeout=0)
+        timeout = self.core.delete_namespaced_pod.call_args.kwargs["_request_timeout"]
+        self.assertGreater(timeout, 0)
+
+    @patch("pycalrissian.utils.time.monotonic")
+    def test_slow_read_hits_deadline(self, monotonic, _sleep):
+        clock = [0.0]
+        monotonic.side_effect = lambda: clock[0]
+
+        def slow_read(**kwargs):
+            # each read takes as long as its timeout allows
+            clock[0] += kwargs["_request_timeout"]
+            return pod("Pending")
+
+        self.core.read_namespaced_pod.side_effect = slow_read
+        with self.assertRaisesRegex(HelperPodError, "still Pending after 60s"):
+            self.helper_pod(timeout=60)
+        self.assertEqual(self.core.read_namespaced_pod.call_count, 2)
+        timeouts = [
+            c.kwargs["_request_timeout"]
+            for c in self.core.read_namespaced_pod.call_args_list
+        ]
+        self.assertEqual(timeouts, [30, 30])
+        self.core.delete_namespaced_pod.assert_called_once()
 
     def test_copy_from_volume_raises(self, _sleep):
         self.core.read_namespaced_persistent_volume_claim.side_effect = ApiException(
