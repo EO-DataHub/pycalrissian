@@ -47,15 +47,13 @@ class CalrissianExecution:
                 namespace=self.runtime_context.namespace,
                 pretty=True,
             )
-            if response.status.active is None and response.status.start_time is None:
-                return JobStatus.ACTIVE
-            if response.status.active:
-                return JobStatus.ACTIVE
-            if response.status.succeeded:
-                return JobStatus.SUCCEEDED
-            if response.status.failed:
-                return JobStatus.FAILED
-            return None
+            # only Complete and Failed are final, a job between retries is still active
+            for condition in response.status.conditions or []:
+                if condition.status == "True" and condition.type == "Complete":
+                    return JobStatus.SUCCEEDED
+                if condition.status == "True" and condition.type == "Failed":
+                    return JobStatus.FAILED
+            return JobStatus.ACTIVE
         except ApiException as e:
             logger.error(f"Exception when calling get status: {e}\n")
             raise e
@@ -78,7 +76,7 @@ class CalrissianExecution:
 
     def get_output(self) -> Dict:
         """Returns the job output"""
-        if self.is_succeeded:
+        if self.is_succeeded():
             filename = self.get_file_from_volume(["output.json"])[0]
             with open(filename, "r") as staged_file:
                 try:
@@ -113,7 +111,7 @@ class CalrissianExecution:
 
     def get_usage_report(self) -> Dict:
         """Returns the job usage report"""
-        if self.is_complete:
+        if self.is_complete():
             try:
                 filename = self.get_file_from_volume(["report.json"])[0]
                 with open(filename, "r") as staged_file:
@@ -150,14 +148,14 @@ class CalrissianExecution:
 
     def get_log(self):
         """Returns the job execution log"""
-        if self.is_complete:
+        if self.is_complete():
             return self._get_container_log(ContainerNames.CALRISSIAN)
         return None
 
     def get_tool_logs(self):
         """stages the tool logs from k8s volume"""
         usage_report = self.get_usage_report()
-        if "children" in usage_report.keys():
+        if usage_report and "children" in usage_report:
             self.get_file_from_volume(
                 [
                     os.path.join(self.job.calrissian_base_path, tool["name"] + ".log")
@@ -180,7 +178,11 @@ class CalrissianExecution:
                 label_selector=pod_label_selector,
                 timeout_seconds=10,
             )
-            pod_name = pods_list.items[0].metadata.name
+            # a disrupted pod is replaced, so read the newest one
+            pod = max(
+                pods_list.items, key=lambda item: item.metadata.creation_timestamp
+            )
+            pod_name = pod.metadata.name
 
             return self.runtime_context.core_v1_api.read_namespaced_pod_log(
                 name=pod_name,

@@ -17,6 +17,15 @@ from kubernetes.client.rest import ApiException
 from kubernetes.stream import stream
 from pycalrissian.context import CalrissianContext
 
+HELPER_POD_TIMEOUT = int(os.environ.get("HELPER_POD_TIMEOUT_SECONDS", "300"))
+# the kubernetes client waits forever by default, so every helper call is bounded
+API_CALL_TIMEOUT = 30
+API_CALL_MIN_TIMEOUT = 5
+
+
+class HelperPodError(Exception):
+    """Raised when the helper pod cannot be used to reach the volume."""
+
 
 class HelperPod:
     def __init__(
@@ -24,10 +33,12 @@ class HelperPod:
         context: CalrissianContext,
         volume: Dict,
         volume_mount: Dict,
+        timeout: int = HELPER_POD_TIMEOUT,
     ):
         self.context = context
         self.volume = volume
         self.volume_mount = volume_mount
+        self.timeout = timeout
         self.container_name = "container-kube-cp"
         self.pod_name = f"kube-cp-{self._get_uid()}"
 
@@ -37,7 +48,30 @@ class HelperPod:
     def _get_uid():
         return str(uuid.uuid4())[-6:]
 
+    def _request_timeout(self):
+        remaining = self._deadline - time.monotonic()
+        return max(API_CALL_MIN_TIMEOUT, min(API_CALL_TIMEOUT, remaining))
+
+    def _check_volume(self):
+        claim_name = (self.volume.get("persistentVolumeClaim") or {}).get("claimName")
+        if not claim_name:
+            return
+        try:
+            pvc = self.context.core_v1_api.read_namespaced_persistent_volume_claim(
+                name=claim_name,
+                namespace=self.context.namespace,
+                _request_timeout=self._request_timeout(),
+            )
+        except ApiException as e:
+            if e.status == 404:
+                raise HelperPodError(f"pvc {claim_name} not found") from e
+            raise
+        if pvc.metadata.deletion_timestamp is not None:
+            raise HelperPodError(f"pvc {claim_name} is being deleted")
+
     def _create_pod(self):
+        self._deadline = time.monotonic() + self.timeout
+        self._check_volume()
         pod_manifest = {
             "apiVersion": "v1",
             "kind": "Pod",
@@ -64,26 +98,49 @@ class HelperPod:
                 ],
             },
         }
-        resp = self.context.core_v1_api.create_namespaced_pod(
-            body=pod_manifest,
-            namespace=self.context.namespace,
-        )
+        # the pod may exist even when the create response is lost, so clean up
+        # on any failure from here on
+        try:
+            self.context.core_v1_api.create_namespaced_pod(
+                body=pod_manifest,
+                namespace=self.context.namespace,
+                _request_timeout=self._request_timeout(),
+            )
+            self._wait_for_pod()
+        except Exception:
+            self.dismiss()
+            raise
+
+    def _wait_for_pod(self):
         while True:
             resp = self.context.core_v1_api.read_namespaced_pod(
                 name=self.pod_name,
                 namespace=self.context.namespace,
+                _request_timeout=self._request_timeout(),
             )
-            if resp.status.phase != "Pending":
-                break
+            phase = resp.status.phase
+            if phase == "Running":
+                return
+            if phase not in (None, "Pending"):
+                raise HelperPodError(f"helper pod {self.pod_name} is {phase}")
+            if time.monotonic() >= self._deadline:
+                raise HelperPodError(
+                    f"helper pod {self.pod_name} still Pending after {self.timeout}s"
+                )
             time.sleep(1)
 
     def dismiss(self):
         try:
+            # cleanup often runs after the deadline, so use a fixed timeout
             self.context.core_v1_api.delete_namespaced_pod(
                 self.pod_name,
                 self.context.namespace,
+                _request_timeout=API_CALL_TIMEOUT,
             )
-        except ApiException as e:
+        # best effort: a failed delete must not hide the caller's error
+        except Exception as e:
+            if isinstance(e, ApiException) and e.status == 404:
+                return
             print(
                 f"Exception when calling CoreV1Api->delete_namespaced_pod: {e}\n",
                 file=sys.stderr,
